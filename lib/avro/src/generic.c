@@ -59,7 +59,7 @@ avro_generic_value_new(avro_value_iface_t *iface, avro_value_t *dest)
 	size_t  instance_size = avro_value_instance_size(giface);
 	void  *self = avro_malloc(instance_size + sizeof(volatile int));
 	if (self == NULL) {
-		avro_set_error(strerror(ENOMEM));
+		avro_set_error("%s", strerror(ENOMEM));
 		dest->iface = NULL;
 		dest->self = NULL;
 		return ENOMEM;
