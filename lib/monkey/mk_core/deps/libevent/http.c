@@ -490,7 +490,7 @@ evhttp_maybe_add_date_header(struct evkeyvalq *headers)
 {
 	if (evhttp_find_header(headers, "Date") == NULL) {
 		char date[50];
-		if (sizeof(date) - evutil_date_rfc1123(date, sizeof(date), NULL) > 0) {
+		if (evutil_date_rfc1123(date, sizeof(date), NULL) < sizeof(date)) {
 			evhttp_add_header(headers, "Date", date);
 		}
 	}
