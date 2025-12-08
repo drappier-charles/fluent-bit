@@ -1199,6 +1199,6 @@ static int cmt_decode_prometheus_error(void *yyscanner,
                                        struct cmt_decode_prometheus_context *context,
                                        const char *msg)
 {
-    report_error(context, CMT_DECODE_PROMETHEUS_SYNTAX_ERROR, msg);
+    report_error(context, CMT_DECODE_PROMETHEUS_SYNTAX_ERROR, "%s", msg);
     return 0;
 }
