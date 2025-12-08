@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - build
+      - cdrappier/remove-security-problem
   workflow_dispatch:
 
 env:
