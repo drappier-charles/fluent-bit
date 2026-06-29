@@ -21,7 +21,7 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       
@@ -91,7 +91,7 @@ jobs:
             > fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz.sha256
       
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fluent-bit-linux-amd64
           path: |
@@ -100,7 +100,7 @@ jobs:
           retention-days: 30
       
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: build-${{ steps.version.outputs.git_sha }}
           name: Build ${{ steps.version.outputs.git_sha }} (Custom IMDS Support)
