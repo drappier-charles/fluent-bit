@@ -1,0 +1,135 @@
+name: Build Custom
+
+on:
+  push:
+    branches:
+      - build
+      - cdrappier/devin/imds-metadata-endpoint-env-var-build
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: Build Fluent Bit (Linux AMD64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to create/update releases
+    container:
+      image: ubuntu:22.04  # Ubuntu 22.04 has CMake 3.22+ and GLIBC 2.35 for better compatibility
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Install dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y \
+            build-essential \
+            cmake \
+            flex \
+            bison \
+            libssl-dev \
+            libsystemd-dev \
+            git \
+            curl
+      
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_C_FLAGS="-O2 -mno-avx -mno-avx2 -mno-sse4.1 -mno-sse4.2" \
+            -DCMAKE_CXX_FLAGS="-O2 -mno-avx -mno-avx2 -mno-sse4.1 -mno-sse4.2" \
+            -DFLB_DEV=Off \
+            -DFLB_SHARED_LIB=Off \
+            -DFLB_TESTS=Off \
+            -DFLB_CONFIG_YAML=Off \
+            -DFLB_OUT_KINESIS_STREAMS=On
+      
+      - name: Build
+        run: cmake --build build -j$(nproc)
+      
+      - name: Get version info
+        id: version
+        shell: bash
+        run: |
+          # Get Fluent Bit version
+          FB_VERSION=$(build/bin/fluent-bit --version | head -1 | awk '{print $3}')
+          echo "fb_version=$FB_VERSION" >> $GITHUB_OUTPUT
+          
+          # Use GitHub SHA for commit info
+          GIT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          echo "git_sha=$GIT_SHA" >> $GITHUB_OUTPUT
+          
+          # Determine release tag
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${FB_VERSION}-custom-${GIT_SHA}"
+          fi
+          echo "release_tag=$TAG" >> $GITHUB_OUTPUT
+          
+      
+      - name: Create tarball
+        run: |
+          mkdir -p fluent-bit-dist
+          cp build/bin/fluent-bit fluent-bit-dist/
+          chmod +x fluent-bit-dist/fluent-bit
+          tar -czf fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz \
+            -C fluent-bit-dist fluent-bit
+      
+      - name: Generate checksum
+        run: |
+          sha256sum fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz \
+            > fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz.sha256
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluent-bit-linux-amd64
+          path: |
+            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz
+            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz.sha256
+          retention-days: 30
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ steps.version.outputs.git_sha }}
+          name: Build ${{ steps.version.outputs.git_sha }} (Custom IMDS Support)
+          prerelease: true
+          files: |
+            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz
+            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz.sha256
+          body: |
+            ## Custom Fluent Bit Build with IAM Roles Anywhere Support
+            
+            **⚠️ This is an automated pre-release build from the `build` branch**
+            
+            ### Features
+            - ✅ Custom IMDS endpoint support (AWS IAM Roles Anywhere compatible)
+            - ✅ Extended timeout (10 seconds) for custom endpoints
+            - ✅ Kinesis Streams output plugin enabled
+            - ✅ Built for Linux AMD64
+            
+            ### Installation
+            ```bash
+            tar -xzf fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz
+            sudo mv fluent-bit /usr/local/bin/
+            sudo chmod +x /usr/local/bin/fluent-bit
+            ```
+            
+            ### Version Information
+            - Fluent Bit Version: ${{ steps.version.outputs.fb_version }}
+            - Git Commit: ${{ steps.version.outputs.git_sha }} 
+            - Build Date: ${{ github.event.head_commit.timestamp }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
