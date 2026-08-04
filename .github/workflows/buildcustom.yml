@@ -9,6 +9,11 @@ on:
 
 env:
   BUILD_TYPE: Release
+  # Every arch a release must carry. The build matrix below cannot read `env`
+  # (GitHub evaluates strategy.matrix before it), so it repeats these values;
+  # the release job checks the published set against this list, which is what
+  # catches the two drifting apart.
+  RELEASE_ARCHES: amd64 arm64
 
 jobs:
   build:
@@ -104,6 +109,13 @@ jobs:
           case "${{ matrix.arch }}" in
             amd64) EXPECT="x86-64" ;;
             arm64) EXPECT="aarch64" ;;
+            # A new arch must stop here rather than fall through: an unset EXPECT
+            # would compare against the empty string, which every binary
+            # contains, so the assertion would pass for anything.
+            *)
+              echo "::error::no expected ISA known for arch '${{ matrix.arch }}'; add one here when extending the matrix"
+              exit 1
+              ;;
           esac
           FILE_OUT=$(file -b build/bin/fluent-bit)
           echo "$FILE_OUT"
@@ -148,7 +160,10 @@ jobs:
       # One release carrying every arch, created once. Publishing from inside the
       # matrix instead would have each arch racing to create the same tag.
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        # SHA-pinned, not tagged: this job holds `contents: write` and publishes
+        # the assets hosts install, so a retargeted tag here could rewrite them.
+        # v4.3.0, the commit `v4` resolves to today — same code, fixed.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: fluent-bit-linux-*
           path: dist
@@ -163,8 +178,27 @@ jobs:
           echo "Publishing:"
           ls -la dist/
 
+      - name: Require a tarball for every arch
+        shell: bash
+        run: |
+          # `needs: build` gates on every leg succeeding, but not on its artifact
+          # arriving here. Publishing dist/ unchecked would ship the partial
+          # release this job exists to prevent if a download came back short.
+          missing=()
+          for arch in $RELEASE_ARCHES; do
+            compgen -G "dist/*-linux-${arch}.tar.gz" > /dev/null || missing+=("$arch")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::no tarball for: ${missing[*]} — refusing to publish a partial release"
+            exit 1
+          fi
+          echo "All expected arches present: $RELEASE_ARCHES"
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        # v1 no longer runs on GitHub Actions at all (its Node runtime is retired,
+        # which actionlint flags as an error). v3.0.2 runs on node24 and takes the
+        # same inputs; SHA-pinned for the reason above.
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
         with:
           tag_name: build-${{ steps.facts.outputs.git_sha }}
           name: Build ${{ steps.facts.outputs.git_sha }} (Custom IMDS Support)
@@ -185,9 +219,11 @@ jobs:
 
             ### Installation
             ```bash
-            # Pick the tarball matching the host: linux-amd64 or linux-arm64
+            # Pick the tarball matching the host: linux-amd64 or linux-arm64.
+            # Globbed rather than spelled out because the version part differs
+            # between a tag build (v5.1.0) and a branch build (v5.1.0-custom-<sha>).
             ARCH=$(dpkg --print-architecture)
-            tar -xzf fluent-bit-${{ steps.facts.outputs.fb_version }}-custom-${{ steps.facts.outputs.git_sha }}-linux-${ARCH}.tar.gz
+            tar -xzf fluent-bit-*-linux-"${ARCH}".tar.gz
             sudo mv fluent-bit /usr/local/bin/
             sudo chmod +x /usr/local/bin/fluent-bit
             ```
