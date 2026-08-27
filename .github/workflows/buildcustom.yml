@@ -9,22 +9,41 @@ on:
 
 env:
   BUILD_TYPE: Release
+  # Every arch a release must carry. The build matrix below cannot read `env`
+  # (GitHub evaluates strategy.matrix before it), so it repeats these values;
+  # the release job checks the published set against this list, which is what
+  # catches the two drifting apart.
+  RELEASE_ARCHES: amd64 arm64
 
 jobs:
   build:
-    name: Build Fluent Bit (Linux AMD64)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write  # Required to create/update releases
+    name: Build Fluent Bit (Linux ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Surface both archs' failures in one run instead of cancelling the sibling
+      # on the first error. The release still requires every arch to succeed.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            # Keep the x86 baseline free of AVX/SSE4 so one binary runs on every
+            # host generation in the fleet.
+            arch_c_flags: "-mno-avx -mno-avx2 -mno-sse4.1 -mno-sse4.2"
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            # The -mno-* switches above are x86-only; aarch64 gcc rejects them
+            # outright, so this must stay empty rather than mirror amd64.
+            arch_c_flags: ""
     container:
       image: ubuntu:22.04  # Ubuntu 22.04 has CMake 3.22+ and GLIBC 2.35 for better compatibility
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Install dependencies
         run: |
           export DEBIAN_FRONTEND=noninteractive
@@ -37,25 +56,26 @@ jobs:
             libssl-dev \
             libsystemd-dev \
             git \
-            curl
-      
+            curl \
+            file
+
       - name: Configure CMake
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_CXX_COMPILER=g++ \
-            -DCMAKE_C_FLAGS="-O2 -mno-avx -mno-avx2 -mno-sse4.1 -mno-sse4.2" \
-            -DCMAKE_CXX_FLAGS="-O2 -mno-avx -mno-avx2 -mno-sse4.1 -mno-sse4.2" \
+            -DCMAKE_C_FLAGS="-O2 ${{ matrix.arch_c_flags }}" \
+            -DCMAKE_CXX_FLAGS="-O2 ${{ matrix.arch_c_flags }}" \
             -DFLB_DEV=Off \
             -DFLB_SHARED_LIB=Off \
             -DFLB_TESTS=Off \
             -DFLB_CONFIG_YAML=Off \
             -DFLB_OUT_KINESIS_STREAMS=On
-      
+
       - name: Build
         run: cmake --build build -j$(nproc)
-      
+
       - name: Get version info
         id: version
         shell: bash
@@ -63,11 +83,11 @@ jobs:
           # Get Fluent Bit version
           FB_VERSION=$(build/bin/fluent-bit --version | head -1 | awk '{print $3}')
           echo "fb_version=$FB_VERSION" >> $GITHUB_OUTPUT
-          
+
           # Use GitHub SHA for commit info
           GIT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
           echo "git_sha=$GIT_SHA" >> $GITHUB_OUTPUT
-          
+
           # Determine release tag
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
@@ -75,61 +95,141 @@ jobs:
             TAG="${FB_VERSION}-custom-${GIT_SHA}"
           fi
           echo "release_tag=$TAG" >> $GITHUB_OUTPUT
-          
-      
+
+          # The release job has no binary to interrogate, so carry the version
+          # across in the artifact.
+          echo "$FB_VERSION" > fb_version.txt
+
+      - name: Verify binary architecture
+        shell: bash
+        run: |
+          # A tarball whose contents do not match its name is the failure mode
+          # this matrix exists to prevent: it installs fine and only dies as
+          # "Exec format error" on the host. Catch it here instead.
+          case "${{ matrix.arch }}" in
+            amd64) EXPECT="x86-64" ;;
+            arm64) EXPECT="aarch64" ;;
+            # A new arch must stop here rather than fall through: an unset EXPECT
+            # would compare against the empty string, which every binary
+            # contains, so the assertion would pass for anything.
+            *)
+              echo "::error::no expected ISA known for arch '${{ matrix.arch }}'; add one here when extending the matrix"
+              exit 1
+              ;;
+          esac
+          FILE_OUT=$(file -b build/bin/fluent-bit)
+          echo "$FILE_OUT"
+          if [[ "$FILE_OUT" != *"$EXPECT"* ]]; then
+            echo "::error::built binary is not $EXPECT (${{ matrix.arch }}): $FILE_OUT"
+            exit 1
+          fi
+
       - name: Create tarball
         run: |
           mkdir -p fluent-bit-dist
           cp build/bin/fluent-bit fluent-bit-dist/
           chmod +x fluent-bit-dist/fluent-bit
-          tar -czf fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz \
+          tar -czf fluent-bit-${{ steps.version.outputs.release_tag }}-linux-${{ matrix.arch }}.tar.gz \
             -C fluent-bit-dist fluent-bit
-      
+
       - name: Generate checksum
         run: |
-          sha256sum fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz \
-            > fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz.sha256
-      
+          sha256sum fluent-bit-${{ steps.version.outputs.release_tag }}-linux-${{ matrix.arch }}.tar.gz \
+            > fluent-bit-${{ steps.version.outputs.release_tag }}-linux-${{ matrix.arch }}.tar.gz.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fluent-bit-linux-amd64
+          name: fluent-bit-linux-${{ matrix.arch }}
           path: |
-            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz
-            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz.sha256
+            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-${{ matrix.arch }}.tar.gz
+            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-${{ matrix.arch }}.tar.gz.sha256
+            fb_version.txt
           retention-days: 30
-      
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+
+  release:
+    name: Publish release
+    # Every arch must build. A release carrying only one of them is worse than no
+    # release: it looks complete, and a host of the missing arch pins it and then
+    # fails at install time.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to create/update releases
+    steps:
+      # One release carrying every arch, created once. Publishing from inside the
+      # matrix instead would have each arch racing to create the same tag.
+      - name: Download build artifacts
+        # SHA-pinned, not tagged: this job holds `contents: write` and publishes
+        # the assets hosts install, so a retargeted tag here could rewrite them.
+        # v4.3.0, the commit `v4` resolves to today — same code, fixed.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          tag_name: build-${{ steps.version.outputs.git_sha }}
-          name: Build ${{ steps.version.outputs.git_sha }} (Custom IMDS Support)
+          pattern: fluent-bit-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Collect release facts
+        id: facts
+        shell: bash
+        run: |
+          echo "fb_version=$(cat dist/fb_version.txt)" >> $GITHUB_OUTPUT
+          echo "git_sha=$(echo "$GITHUB_SHA" | cut -c1-7)" >> $GITHUB_OUTPUT
+          echo "Publishing:"
+          ls -la dist/
+
+      - name: Require a tarball for every arch
+        shell: bash
+        run: |
+          # `needs: build` gates on every leg succeeding, but not on its artifact
+          # arriving here. Publishing dist/ unchecked would ship the partial
+          # release this job exists to prevent if a download came back short.
+          missing=()
+          for arch in $RELEASE_ARCHES; do
+            compgen -G "dist/*-linux-${arch}.tar.gz" > /dev/null || missing+=("$arch")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::no tarball for: ${missing[*]} — refusing to publish a partial release"
+            exit 1
+          fi
+          echo "All expected arches present: $RELEASE_ARCHES"
+
+      - name: Create Release
+        # v1 no longer runs on GitHub Actions at all (its Node runtime is retired,
+        # which actionlint flags as an error). v3.0.2 runs on node24 and takes the
+        # same inputs; SHA-pinned for the reason above.
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+        with:
+          tag_name: build-${{ steps.facts.outputs.git_sha }}
+          name: Build ${{ steps.facts.outputs.git_sha }} (Custom IMDS Support)
           prerelease: true
           files: |
-            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz
-            fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz.sha256
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
           body: |
             ## Custom Fluent Bit Build with IAM Roles Anywhere Support
-            
-            **⚠️ This is an automated pre-release build from the `build` branch**
-            
+
+            **⚠️ This is an automated pre-release build**
+
             ### Features
             - ✅ Custom IMDS endpoint support (AWS IAM Roles Anywhere compatible)
             - ✅ Extended timeout (10 seconds) for custom endpoints
             - ✅ Kinesis Streams output plugin enabled
-            - ✅ Built for Linux AMD64
-            
+            - ✅ Built for Linux AMD64 and ARM64
+
             ### Installation
             ```bash
-            tar -xzf fluent-bit-${{ steps.version.outputs.release_tag }}-linux-amd64.tar.gz
+            # Pick the tarball matching the host: linux-amd64 or linux-arm64.
+            # Globbed rather than spelled out because the version part differs
+            # between a tag build (v5.1.0) and a branch build (v5.1.0-custom-<sha>).
+            ARCH=$(dpkg --print-architecture)
+            tar -xzf fluent-bit-*-linux-"${ARCH}".tar.gz
             sudo mv fluent-bit /usr/local/bin/
             sudo chmod +x /usr/local/bin/fluent-bit
             ```
-            
+
             ### Version Information
-            - Fluent Bit Version: ${{ steps.version.outputs.fb_version }}
-            - Git Commit: ${{ steps.version.outputs.git_sha }} 
-            - Build Date: ${{ github.event.head_commit.timestamp }}
+            - Fluent Bit Version: ${{ steps.facts.outputs.fb_version }}
+            - Git Commit: ${{ steps.facts.outputs.git_sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
